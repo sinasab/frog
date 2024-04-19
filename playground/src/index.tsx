@@ -89,6 +89,12 @@ export const app = new Frog({
       ],
     })
   })
+  .frame('/square-or-rectangle', (c) => {
+    return c.res({
+      image: <Box grow backgroundColor="red" />,
+      imageAspectRatio: Math.random() > 0.5 ? '1:1' : '1.91:1',
+    })
+  })
   .frame('/no-intents', (c) => {
     return c.res({
       image: <Box grow backgroundColor="red" />,

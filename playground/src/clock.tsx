@@ -3,7 +3,9 @@ import { Heading, VStack, vars } from './ui.js'
 
 export const app = new Frog({
   ui: { vars },
-  headers: { 'cache-control': 'max-age=0' },
+  imageOptions: {
+    headers: { 'Cache-Control': 'max-age=0' },
+  },
 }).frame('/', (c) => {
   return c.res({
     image: (

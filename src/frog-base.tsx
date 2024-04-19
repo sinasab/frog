@@ -44,6 +44,7 @@ import { requestBodyToContext } from './utils/requestBodyToContext.js'
 import { serializeJson } from './utils/serializeJson.js'
 import { toSearchParams } from './utils/toSearchParams.js'
 import { version } from './version.js'
+import type { Child } from './ui/types.js'
 
 export type FrogConstructorParameters<
   env extends Env = Env,
@@ -258,6 +259,15 @@ export class FrogBase<
   verify: FrogConstructorParameters['verify'] = true
 
   _dev: string | undefined
+  _initialImageStorage: Record<
+    string,
+    | {
+        options: ImageOptions | undefined
+        image?: Child | string
+      }
+    | null
+    | undefined
+  >
   version = version
 
   constructor({
@@ -302,6 +312,7 @@ export class FrogBase<
 
     if (dev) this.dev = { enabled: true, ...(dev ?? {}) }
     this._dev = undefined // this is set `true` by `devtools` helper
+    this._initialImageStorage = {}
 
     // allow devtools to work with dynamic params off base path
     this.hono.all('*', async (c, next) => {
@@ -389,11 +400,25 @@ export class FrogBase<
     const imagePaths = getImagePaths(parseHonoPath(path))
     for (const imagePath of imagePaths) {
       this.hono.get(imagePath, async (c) => {
+        const url = getRequestUrl(c.req)
+        const origin = this.origin ?? url.origin
+        const assetsUrl = origin + parsePath(this.assetsPath)
+
         const defaultImageOptions = await (async () => {
           if (typeof this.imageOptions === 'function')
             return await this.imageOptions()
           return this.imageOptions
         })()
+
+        const {
+          headers = this.headers,
+          image,
+          imageOptions = defaultImageOptions,
+        } = fromQuery<{
+          headers: Record<string, string> | undefined
+          image: string | undefined
+          imageOptions: ImageOptions | undefined
+        }>(c.req.query())
 
         const fonts = await (async () => {
           if (this.ui?.vars?.fonts)
@@ -403,19 +428,82 @@ export class FrogBase<
           return defaultImageOptions?.fonts
         })()
 
-        const {
-          headers = this.headers,
-          image,
-          imageOptions = defaultImageOptions,
-        } = fromQuery<any>(c.req.query())
-        const image_ = JSON.parse(lz.decompressFromEncodedURIComponent(image))
+        const imageOptions_ =
+          this._initialImageStorage[path]?.options ?? imageOptions
+
+        const image_ = image
+          ? JSON.parse(lz.decompressFromEncodedURIComponent(image))
+          : this._initialImageStorage[path]?.image ??
+            (await (async () => {
+              // Request body will be empty since a request for the image is always done with
+              // `GET` http method. Thus, the result of the next invocation is intristically the same
+              // as getting frame context for an initial frame.
+              const { context } = getFrameContext<env, string>({
+                context: await requestBodyToContext(c, {
+                  hub:
+                    this.hub ||
+                    (this.hubApiUrl ? { apiUrl: this.hubApiUrl } : undefined),
+                  secret: this.secret,
+                  verify,
+                }),
+                initialState: this._initialState,
+                origin,
+              })
+              const response = await handler(context)
+
+              // Initial frames should never return non-'success' response as there is no `frameData`
+              // to perform any logic against.
+              if (response.status !== 'success')
+                throw new Error(
+                  'Unexpected error: Initial frame cannot return an error response.',
+                )
+
+              const image = response.data.image
+
+              // `image` should never be of type `string` in this case as `fc:frame:image` is set directly
+              // to the image URL or it's base64 data representation in case it is string, thus resolving such
+              // would never trigger this endpoint.
+              if (typeof image === 'string')
+                throw new Error(
+                  'Unexpected error: Expected `image` of type `JSX.Element` for the initial frame image.',
+                )
+
+              return parseImage(
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    height: '100%',
+                    width: '100%',
+                  }}
+                >
+                  {await image}
+                </div>,
+                {
+                  assetsUrl,
+                  ui: {
+                    ...this.ui,
+                    vars: {
+                      ...this.ui?.vars,
+                      frame: {
+                        height: imageOptions_?.height!,
+                        width: imageOptions_?.width!,
+                      },
+                    },
+                  },
+                },
+              )
+            })())
+
+        if (this._initialImageStorage[path])
+          this._initialImageStorage[path] = null
         return new ImageResponse(image_, {
           width: 1200,
           height: 630,
-          ...imageOptions,
-          format: imageOptions?.format ?? 'png',
+          ...imageOptions_,
+          format: imageOptions_?.format ?? 'png',
           fonts: await parseFonts(fonts),
-          headers: imageOptions?.headers ?? headers,
+          headers: imageOptions_?.headers ?? headers,
         })
       })
     }
@@ -532,35 +620,42 @@ export class FrogBase<
 
       const imageUrl = await (async () => {
         if (typeof image !== 'string') {
-          const compressedImage = lz.compressToEncodedURIComponent(
-            JSON.stringify(
-              await parseImage(
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    height: '100%',
-                    width: '100%',
-                  }}
-                >
-                  {await image}
-                </div>,
-                {
-                  assetsUrl,
-                  ui: {
-                    ...this.ui,
-                    vars: {
-                      ...this.ui?.vars,
-                      frame: {
-                        height: imageOptions?.height!,
-                        width: imageOptions?.width!,
-                      },
-                    },
+          const parsedImage = await parseImage(
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                height: '100%',
+                width: '100%',
+              }}
+            >
+              {await image}
+            </div>,
+            {
+              assetsUrl,
+              ui: {
+                ...this.ui,
+                vars: {
+                  ...this.ui?.vars,
+                  frame: {
+                    height: imageOptions?.height!,
+                    width: imageOptions?.width!,
                   },
                 },
-              ),
-            ),
+              },
+            },
           )
+
+          if (context.status === 'initial') {
+            this._initialImageStorage[path] = {
+              image: parsedImage,
+              options: imageOptions,
+            }
+          }
+          const compressedImage =
+            context.status === 'initial'
+              ? null
+              : lz.compressToEncodedURIComponent(JSON.stringify(parsedImage))
           const imageParams = toSearchParams({
             image: compressedImage,
             imageOptions: imageOptions
@@ -572,9 +667,19 @@ export class FrogBase<
               : undefined,
             headers,
           })
-          return `${parsePath(context.url)}/image?${imageParams}`
+          return `${parsePath(context.url)}/image${
+            imageParams.size !== 0 ? `?${imageParams}` : ''
+          }`
         }
-        if (image.startsWith('http') || image.startsWith('data')) return image
+        if (image.startsWith('http') || image.startsWith('data')) {
+          if (context.status === 'initial') {
+            this._initialImageStorage[path] = {
+              image,
+              options: imageOptions,
+            }
+          }
+          return image
+        }
         return `${assetsUrl + parsePath(image)}`
       })()
 
