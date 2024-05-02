@@ -24,6 +24,7 @@ import type {
   MiddlewareHandlerInterface,
   TransactionHandler,
 } from './types/routes.js'
+import type { Child } from './ui/types.js'
 import type { Vars } from './ui/vars.js'
 import { fromQuery } from './utils/fromQuery.js'
 import { getButtonValues } from './utils/getButtonValues.js'
@@ -44,7 +45,6 @@ import { requestBodyToContext } from './utils/requestBodyToContext.js'
 import { serializeJson } from './utils/serializeJson.js'
 import { toSearchParams } from './utils/toSearchParams.js'
 import { version } from './version.js'
-import type { Child } from './ui/types.js'
 
 export type FrogConstructorParameters<
   env extends Env = Env,
